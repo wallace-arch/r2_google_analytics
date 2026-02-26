@@ -1,0 +1,94 @@
+import os
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
+from pathlib import Path
+import mysql.connector
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import (
+    DateRange,
+    Dimension,
+    Metric,
+    RunReportRequest
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
+
+load_dotenv()
+
+CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH")
+PROPERTY_ID = os.getenv("PROPERTY_ID")
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+}
+
+hoje = datetime.today().date()
+data_inicio = hoje - timedelta(days=7)
+
+DATA_INICIO = data_inicio.strftime("%Y-%m-%d")
+DATA_FIM = "today" 
+
+
+if not CREDENTIALS_PATH:
+    raise ValueError("Variável de ambiente CREDENTIALS_PATH não definida")
+
+if not PROPERTY_ID:
+    raise ValueError("Variável de ambiente PROPERTY_ID não definida")
+
+for key, value in DB_CONFIG.items():
+    if value is None:
+        raise ValueError(f"Variável de ambiente {key.upper()} não definida")
+
+
+ga_client = BetaAnalyticsDataClient.from_service_account_file(
+    CREDENTIALS_PATH
+)
+
+request = RunReportRequest(
+    property=f"properties/{PROPERTY_ID}",
+    dimensions=[
+        Dimension(name="date"),
+        Dimension(name="pagePath"),
+    ],
+    metrics=[
+        Metric(name="screenPageViews"),
+    ],
+    date_ranges=[
+        DateRange(start_date=DATA_INICIO, end_date=DATA_FIM),
+    ],
+)
+
+response = ga_client.run_report(request)
+
+
+conn = mysql.connector.connect(**DB_CONFIG)
+cursor = conn.cursor()
+
+insert_sql = """
+INSERT INTO R2_GOOGLE_ANALYTICS (data, page_path, page_views)
+VALUES (%s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    page_views = VALUES(page_views)
+"""
+
+
+for row in response.rows:
+    data = datetime.strptime(
+        row.dimension_values[0].value, "%Y%m%d"
+    ).date()
+
+    page_path = row.dimension_values[1].value
+    page_views = int(row.metric_values[0].value)
+
+    cursor.execute(insert_sql, (data, page_path, page_views))
+
+conn.commit()
+cursor.close()
+conn.close()
+
+print("Carga do Google Analytics finalizada com sucesso ✅")
